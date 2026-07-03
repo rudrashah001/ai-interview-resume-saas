@@ -172,9 +172,8 @@ export default function InterviewSession() {
         ))}
         {!session.items?.length && (
           <p className="text-slate-500">
-            Generate questions to start practicing. Free users can still outline
-            answers once questions exist if you add them manually via API — for
-            this UI, use Premium generation.
+            Select mix and count above, then click Generate questions. For Google,
+            Microsoft, etc., saved company questions load even if AI is busy.
           </p>
         )}
       </div>

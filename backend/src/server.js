@@ -5,6 +5,7 @@ import helmet from 'helmet';
 
 import { connectDB } from './config/db.js';
 import { configureCloudinary } from './config/cloudinary.js';
+import { isAiConfigured } from './utils/openaiClient.js';
 import { apiLimiter } from './middleware/rateLimiters.js';
 import { notFound, errorHandler } from './middleware/errorHandler.js';
 import { webhookStripe } from './controllers/paymentController.js';
@@ -23,6 +24,11 @@ import { UPLOADS_ROOT, ensureUploadsDir } from './utils/fileStorage.js';
 
 const app = express();
 configureCloudinary();
+if (isAiConfigured()) {
+  console.log('Gemini AI configured');
+} else {
+  console.warn('GEMINI_API_KEY missing — AI chat, interview & resume analysis will fail');
+}
 
 app.use(helmet());
 app.use(

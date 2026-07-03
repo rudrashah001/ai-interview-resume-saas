@@ -5,6 +5,7 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import { chatCompletion } from '../utils/openaiClient.js';
 import { FEATURED_COMPANIES, LIMITS } from '../config/features.js';
 import { hasFullAccess, getLimits } from '../utils/access.js';
+import { parseAiJson } from '../utils/parseAiJson.js';
 
 export const listSessions = asyncHandler(async (req, res) => {
   const items = await InterviewSession.find({ user: req.user._id }).sort({
@@ -36,6 +37,24 @@ export const createSession = asyncHandler(async (req, res) => {
   });
   res.status(201).json(doc);
 });
+
+function buildFallbackQuestions(session, techCount, hrCount) {
+  const role = session.jobTitle || 'this role';
+  const co = session.company || 'the company';
+  const technical = Array.from({ length: techCount }, (_, i) => ({
+    question: `[${co}] Technical Q${i + 1}: Describe a challenging problem you solved as a ${role}.`,
+    category: 'technical',
+    answer: '',
+    feedback: '',
+  }));
+  const hr = Array.from({ length: hrCount }, (_, i) => ({
+    question: `[${co}] HR Q${i + 1}: Tell me about yourself and why you want to join ${co}.`,
+    category: 'hr',
+    answer: '',
+    feedback: '',
+  }));
+  return [...technical, ...hr];
+}
 
 export const getCompanies = asyncHandler(async (req, res) => {
   res.json({ companies: FEATURED_COMPANIES });
@@ -89,15 +108,26 @@ export const generateQuestions = asyncHandler(async (req, res) => {
     }
   }
 
-  const bankSamples = doc.company
-    ? await InterviewQuestionBank.find({
+  const bankLimit = Math.min(techCount + hrCount, 30);
+  let bankSamples = [];
+  if (doc.company) {
+    const companyRe = new RegExp(doc.company.trim(), 'i');
+    bankSamples = await InterviewQuestionBank.find({
+      isActive: true,
+      company: companyRe,
+      difficulty: doc.difficulty,
+    })
+      .limit(bankLimit)
+      .lean();
+    if (!bankSamples.length) {
+      bankSamples = await InterviewQuestionBank.find({
         isActive: true,
-        company: new RegExp(doc.company, 'i'),
-        difficulty: doc.difficulty,
+        company: companyRe,
       })
-        .limit(Math.min(techCount + hrCount, 30))
-        .lean()
-    : [];
+        .limit(bankLimit)
+        .lean();
+    }
+  }
 
   const bankItems = bankSamples.map((q) => ({
     question: q.question,
@@ -106,43 +136,70 @@ export const generateQuestions = asyncHandler(async (req, res) => {
     feedback: '',
   }));
 
-  let aiItems = [];
-  if (techCount + hrCount > 0) {
-    const prompt = `You are an interview coach. Job: ${doc.jobTitle}. Company: ${doc.company || 'general tech'}. Difficulty: ${doc.difficulty}.
-Return JSON only:
-{"technical":[{"question":"...","category":"technical"}],"hr":[{"question":"...","category":"hr"}]}
-Include exactly ${techCount} technical and ${hrCount} HR/behavioral questions. Use company-specific style when company is known.`;
+  const targetTotal = techCount + hrCount;
 
-    const raw = await chatCompletion([{ role: 'user', content: prompt }], {
-      temperature: 0.6,
-      max_tokens: Math.min(4000, 200 + (techCount + hrCount) * 80),
-    });
-
-    let parsed;
-    try {
-      parsed = JSON.parse(raw.replace(/```json\n?|\n?```/g, '').trim());
-    } catch {
-      res.status(502);
-      throw new Error('Failed to parse AI response');
-    }
-
-    aiItems = [
-      ...(parsed.technical || []).map((q) => ({
-        question: q.question,
-        category: 'technical',
-        answer: '',
-        feedback: '',
-      })),
-      ...(parsed.hr || []).map((q) => ({
-        question: q.question,
-        category: 'hr',
-        answer: '',
-        feedback: '',
-      })),
-    ];
+  if (bankItems.length >= targetTotal && targetTotal > 0) {
+    doc.items = bankItems.slice(0, limits.maxQuestionsPerBatch);
+    await doc.save();
+    return res.json(doc);
   }
 
-  const merged = [...bankItems, ...aiItems].slice(0, limits.maxQuestionsPerBatch);
+  let aiItems = [];
+  const needAi = targetTotal > bankItems.length;
+  if (needAi) {
+    const needTech = Math.max(0, techCount - bankItems.filter((b) => b.category === 'technical').length);
+    const needHr = Math.max(0, hrCount - bankItems.filter((b) => b.category === 'hr').length);
+
+    const prompt = `You are an interview coach. Job: ${doc.jobTitle}. Company: ${doc.company || 'general tech'}. Difficulty: ${doc.difficulty}.
+Return ONLY valid JSON (no markdown):
+{"technical":[{"question":"..."}],"hr":[{"question":"..."}]}
+Include exactly ${needTech} technical and ${needHr} HR/behavioral questions.`;
+
+    try {
+      const raw = await chatCompletion([{ role: 'user', content: prompt }], {
+        temperature: 0.4,
+        max_tokens: Math.min(4096, 200 + (needTech + needHr) * 80),
+      });
+
+      const parsed = parseAiJson(raw);
+      if (parsed) {
+        aiItems = [
+          ...(parsed.technical || []).map((q) => ({
+            question: typeof q === 'string' ? q : q.question,
+            category: 'technical',
+            answer: '',
+            feedback: '',
+          })),
+          ...(parsed.hr || []).map((q) => ({
+            question: typeof q === 'string' ? q : q.question,
+            category: 'hr',
+            answer: '',
+            feedback: '',
+          })),
+        ].filter((q) => q.question);
+      } else {
+        console.warn('Could not parse AI JSON, length:', raw?.length);
+      }
+    } catch (aiErr) {
+      console.warn('AI generation error:', aiErr.message);
+    }
+  }
+
+  let merged = [...bankItems, ...aiItems].slice(0, limits.maxQuestionsPerBatch);
+
+  if (!merged.length) {
+    merged = buildFallbackQuestions(doc, techCount, hrCount).slice(
+      0,
+      limits.maxQuestionsPerBatch
+    );
+  }
+
+  if (!merged.length) {
+    res.status(502);
+    throw new Error(
+      'Could not generate questions. Check GEMINI_API_KEY and run: npm run seed'
+    );
+  }
   if (!hasFullAccess(user)) {
     const existing = doc.items?.length || 0;
     const maxSaved = LIMITS.free.maxSavedQuestions;
