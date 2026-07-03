@@ -1,6 +1,11 @@
 # Node dependencies
 node_modules/
 
+# Build / Vite outputs
+dist/
+build/
+.vite/
+
 # Logs
 npm-debug.log*
 yarn-debug.log*
@@ -14,28 +19,7 @@ pnpm-debug.log*
 .env.*
 .env.example
 
-# Local uploads
-uploads/
-
-# Build / coverage
-dist/
-coverage/
-.nyc_output/
-
-# Runtime files
-pids/
-*.pid
-*.seed
-
 # OS / editor
 .DS_Store
 .vscode/
 .idea/
-
-# Misc
-.envrc
-node_modules/
-.env
-uploads/*
-!uploads/.gitkeep
-.env.example
